@@ -145,7 +145,7 @@ Uses `cd -P "$dir" && pwd -P` in a subshell. The `-P` flag resolves directory-le
 | Library mode via env var guard | `AUTO_SHEBANG_LIB=1` — explicit, works everywhere. |
 | Symlink cycle protection (40 hop limit) | Matches Linux SYMLOOP_MAX. Prevents infinite loops on malicious links. |
 | Exit codes: 0/1/2/126/127 | Standard shell conventions. Distinguishes not-found from config error. |
-| Safe `$VAR` substitution, not `eval` | `eval` is too broad. Safe expansion handles the useful cases without RCE risk. |
+| Safe `$VAR` substitution via validated indirect lookup | Indirect `eval` only after strict `[A-Za-z_][A-Za-z0-9_]*` validation. General `eval` of probe-dir strings would enable command substitution, backticks, and arbitrary code execution. |
 | `unsafe-expand-probe-dirs` naming | The "unsafe" prefix warns that values come from the environment. Default off. |
 
 ## Explicitly not included
@@ -158,7 +158,7 @@ Uses `cd -P "$dir" && pwd -P` in a subshell. The `-P` flag resolves directory-le
 | `--list` (show all candidates) | `AUTO_SHEBANG_DEBUG=1` already shows the trace. Addable later if needed. |
 | `readlink -f` | GNU-only. Single-level `readlink` in a loop when needed. |
 | `readlink` as hard dependency | Only needed for opt-in dual-origin. Default mode is pure POSIX sh. |
-| Shell `eval` for probe-dir expansion | Too broad: enables command substitution, backticks, globs. Safe `$VAR` substitution suffices. |
+| General `eval` for probe-dir expansion | `eval "$entry"` would enable command substitution, backticks, and arbitrary code. Validated indirect variable lookup (`eval "val=\"\${$name:-}\""` after name validation) suffices. |
 | Auto-privilege detection (euid != ruid) | Fragile, platform-specific. `trust-env=no` covers the use case explicitly. |
 | World-writable symlink dir guard | Symlink walk is already opt-in. Document the risk, don't add the check. |
 | Windows native | Shebangs don't work on native Windows. WSL and Git Bash work. |
