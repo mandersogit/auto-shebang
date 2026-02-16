@@ -1,6 +1,6 @@
 #!/bin/sh
 # auto-shebang — language-agnostic interpreter resolver
-# Version: 3.0.0 | License: MIT
+# Version: 3.0.1 | License: MIT
 # Compatibility: POSIX sh (dash, ash, bash, ksh, zsh, busybox sh)
 # Uses 'local' keyword (not strict POSIX, but universally supported).
 #
@@ -10,7 +10,7 @@
 #
 # See: https://github.com/manderso/auto-shebang
 
-AUTO_SHEBANG_VERSION="3.0.0"
+AUTO_SHEBANG_VERSION="3.0.1"
 AUTO_SHEBANG_RESULT=""
 
 # --- Globals ---
@@ -19,6 +19,7 @@ _as_debug="${AUTO_SHEBANG_DEBUG:-0}"
 _as_self=""
 _as_search_name=""
 _as_cr=$(printf '\r')
+_as_tab=$(printf '\t')
 
 # Directive results (set by parse, consumed by build_config)
 _as_d_follow_symlinks=""
@@ -44,6 +45,10 @@ _as_src_symlink_priority=""
 _as_src_probe_dirs=""
 _as_src_unsafe_expand=""
 _as_src_suffixes=""
+
+# Search origins (set by resolve, used by main for error reporting)
+_as_origin1=""
+_as_origin2=""
 
 # --- Utilities ---
 
@@ -103,7 +108,8 @@ auto_shebang_parse_directives() {
                 key="${rest%%=*}"
                 val="${rest#*=}"
                 # Terminate value at first whitespace (space or tab)
-                val=$(printf '%s' "$val" | sed 's/[[:space:]].*//')
+                val="${val%%"$_as_tab"*}"
+                val="${val%% *}"
 
                 case "$key" in
                     follow-symlinks)
@@ -226,11 +232,8 @@ auto_shebang_expand_vars() {
 
     case "$input" in
         *'$('*) auto_shebang_die 2 "unsafe expansion: command substitution in probe-dirs: $input" ;;
+        *'`'*)  auto_shebang_die 2 "unsafe expansion: backtick in probe-dirs: $input" ;;
     esac
-    # Check for backticks
-    if printf '%s' "$input" | grep -q '`'; then
-        auto_shebang_die 2 "unsafe expansion: backtick in probe-dirs: $input"
-    fi
 
     rest="$input"
     while [ -n "$rest" ]; do
@@ -239,11 +242,6 @@ auto_shebang_expand_vars() {
                 output="${output}${rest%%\$*}"
                 rest="${rest#"${rest%%\$*}"}"
                 case "$rest" in
-                    '${'^*'}'*)
-                        # Not a valid var start after {
-                        output="${output}\$"
-                        rest="${rest#\$}"
-                        ;;
                     '${'*'}'*)
                         rest="${rest#\$\{}"
                         name="${rest%%\}*}"
@@ -293,8 +291,15 @@ auto_shebang_expand_probe_entry() {
 
     # Tilde expansion (always)
     case "$entry" in
-        '~') entry="$HOME" ;;
-        '~/'*) entry="${HOME}/${entry#"~/"}" ;;
+        '~'|'~/'*)
+            if [ -z "${HOME:-}" ]; then
+                auto_shebang_die 2 "HOME is not set but probe-dirs contains ~"
+            fi
+            case "$entry" in
+                '~') entry="$HOME" ;;
+                '~/'*) entry="${HOME}/${entry#"~/"}" ;;
+            esac
+            ;;
     esac
 
     # Safe variable expansion (if enabled)
@@ -340,18 +345,19 @@ auto_shebang_validate_candidate() {
 # --- EXE validation (OVERRIDE / FALLBACK) ---
 # Returns: 0=valid, 126=not executable, 127=not found.
 # Dies (exit 2) for: not a regular file, points to self.
+# Always prints error messages (these are explicit operator settings).
 
 auto_shebang_validate_exe() {
     local path="$1" label="$2"
     if [ ! -e "$path" ]; then
-        auto_shebang_dbg "$label: not found: $path"
+        printf '%s: %s not found: %s\n' "${_as_search_name:-auto-shebang}" "$label" "$path" >&2
         return 127
     fi
     if [ ! -f "$path" ]; then
         auto_shebang_die 2 "$label is not a regular file: $path"
     fi
     if [ ! -x "$path" ]; then
-        auto_shebang_dbg "$label: not executable: $path"
+        printf '%s: %s not executable: %s\n' "${_as_search_name:-auto-shebang}" "$label" "$path" >&2
         return 126
     fi
     if [ "$path" -ef "$_as_self" ]; then
@@ -431,15 +437,17 @@ auto_shebang_walk() {
     return 1
 }
 
-# --- Resolve (orchestrator) ---
+# --- Resolve core (internal) ---
 
-auto_shebang_resolve() {
+_as_resolve_core() {
     local search_name="$1" script="$2"
     local script_abs script_dir real_path real_dir symlink_dir
     local origin1 origin2 rc
 
     _as_search_name="$search_name"
     AUTO_SHEBANG_RESULT=""
+    _as_origin1=""
+    _as_origin2=""
 
     # Step 1: Parse directives
     auto_shebang_parse_directives "$script"
@@ -496,6 +504,10 @@ auto_shebang_resolve() {
         fi
     fi
 
+    # Store origins for error reporting
+    _as_origin1="$origin1"
+    _as_origin2="$origin2"
+
     # Step 6: Walk primary origin
     if auto_shebang_walk "$origin1"; then
         auto_shebang_dbg "resolved: $AUTO_SHEBANG_RESULT"
@@ -527,10 +539,37 @@ auto_shebang_resolve() {
     return 1
 }
 
+# --- Resolve (public API) ---
+# In library mode, runs core in a subshell to contain exit calls.
+
+auto_shebang_resolve() {
+    local search_name="$1" script="$2"
+
+    _as_search_name="$search_name"
+    AUTO_SHEBANG_RESULT=""
+    _as_origin1=""
+    _as_origin2=""
+
+    if [ "${AUTO_SHEBANG_LIB:-0}" = "1" ]; then
+        local _lib_out _lib_rc
+        _lib_out=$(
+            _as_resolve_core "$search_name" "$script"
+            _rc=$?
+            [ "$_rc" = 0 ] && printf '%s' "$AUTO_SHEBANG_RESULT"
+            exit "$_rc"
+        )
+        _lib_rc=$?
+        [ "$_lib_rc" = 0 ] && AUTO_SHEBANG_RESULT="$_lib_out"
+        return "$_lib_rc"
+    fi
+
+    _as_resolve_core "$search_name" "$script"
+}
+
 # --- Main ---
 
 auto_shebang_main() {
-    local search_name mode original_script script_dir
+    local search_name mode original_script
 
     # Self-identification for loop prevention
     case "$0" in
@@ -550,6 +589,21 @@ auto_shebang_main() {
                     printf '%s\n' "auto-shebang $AUTO_SHEBANG_VERSION"
                     exit 0
                     ;;
+                --help|-h)
+                    printf '%s\n' "auto-shebang $AUTO_SHEBANG_VERSION -- language-agnostic interpreter resolver"
+                    printf '\n'
+                    printf '%s\n' "Usage:"
+                    printf '%s\n' "  auto-shebang --resolve <name> <script>  Print interpreter path"
+                    printf '%s\n' "  auto-shebang --check <name> <script>    Test if resolvable"
+                    printf '%s\n' "  auto-shebang --version                  Print version"
+                    printf '\n'
+                    printf '%s\n' "Typically invoked via language-specific alias:"
+                    printf '%s\n' "  ln -s auto-shebang auto-python"
+                    printf '%s\n' "  #!/usr/bin/env /path/to/auto-python"
+                    printf '\n'
+                    printf '%s\n' "https://github.com/manderso/auto-shebang"
+                    exit 0
+                    ;;
                 --resolve)
                     [ $# -ge 3 ] || auto_shebang_die 2 "usage: auto-shebang --resolve <name> <script>"
                     search_name="$2"; _as_search_name="$search_name"
@@ -563,7 +617,7 @@ auto_shebang_main() {
                     mode="check"
                     ;;
                 --*)
-                    auto_shebang_die 2 "unknown flag: $1 (use --resolve, --check, or --version)"
+                    auto_shebang_die 2 "unknown flag: $1 (use --resolve, --check, --help, or --version)"
                     ;;
                 '')
                     printf '%s\n' "auto-shebang $AUTO_SHEBANG_VERSION -- language-agnostic interpreter resolver"
@@ -581,7 +635,7 @@ auto_shebang_main() {
                     exit 0
                     ;;
                 *)
-                    auto_shebang_die 2 "unknown argument: $1 (use --resolve, --check, or --version)"
+                    auto_shebang_die 2 "unknown argument: $1 (use --resolve, --check, --help, or --version)"
                     ;;
             esac
             ;;
@@ -606,20 +660,25 @@ auto_shebang_main() {
 
     # Resolve
     if ! auto_shebang_resolve "$search_name" "$original_script"; then
-        script_dir=$(dirname "$original_script")
+        # --check mode: silent failure (exit code only)
+        [ "$mode" = "check" ] && exit 1
+
+        # All other modes: actionable error message
         printf '%s: no interpreter found for: %s\n' "$search_name" "$original_script" >&2
         printf '\n' >&2
-        printf 'Searched from %s to / for:\n' "$script_dir" >&2
-        printf '  %s (suffixes: %s)\n' "$search_name" "$_as_cfg_suffixes" >&2
-        printf '  in probe-dirs: %s\n' "$_as_cfg_probe_dirs" >&2
+        if [ -n "$_as_origin2" ]; then
+            printf 'Search origins: %s, %s\n' "$_as_origin1" "$_as_origin2" >&2
+        elif [ -n "$_as_origin1" ]; then
+            printf 'Search origin: %s (walked to /)\n' "$_as_origin1" >&2
+        fi
+        printf 'Probe dirs: %s\n' "$_as_cfg_probe_dirs" >&2
+        printf 'Suffixes: %s\n' "$_as_cfg_suffixes" >&2
         printf '\n' >&2
         printf 'Create an interpreter symlink:\n' >&2
         printf '  ln -sf /path/to/interpreter <project>/bin/%s\n' "$search_name" >&2
-
-        case "$mode" in
-            check) exit 1 ;;
-            *)     exit 127 ;;
-        esac
+        printf '\n' >&2
+        printf 'Hint: set AUTO_SHEBANG_DEBUG=1 for full resolution trace\n' >&2
+        exit 127
     fi
 
     # Dispatch on mode
