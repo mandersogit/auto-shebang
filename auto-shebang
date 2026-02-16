@@ -1,0 +1,642 @@
+#!/bin/sh
+# auto-shebang — language-agnostic interpreter resolver
+# Version: 3.0.0 | License: MIT
+# Compatibility: POSIX sh (dash, ash, bash, ksh, zsh, busybox sh)
+# Uses 'local' keyword (not strict POSIX, but universally supported).
+#
+# Resolves the correct interpreter for a script by walking up the
+# directory tree, looking for interpreter symlinks whose name matches
+# the resolver's invocation name (busybox pattern).
+#
+# See: https://github.com/manderso/auto-shebang
+
+AUTO_SHEBANG_VERSION="3.0.0"
+AUTO_SHEBANG_RESULT=""
+
+# --- Globals ---
+
+_as_debug="${AUTO_SHEBANG_DEBUG:-0}"
+_as_self=""
+_as_search_name=""
+_as_cr=$(printf '\r')
+
+# Directive results (set by parse, consumed by build_config)
+_as_d_follow_symlinks=""
+_as_d_symlink_priority=""
+_as_d_probe_dirs=""
+_as_d_unsafe_expand=""
+_as_d_suffixes=""
+_as_d_trust_env=""
+
+# Effective config (set by build_config, used by walk/resolve)
+_as_cfg_follow_symlinks=""
+_as_cfg_symlink_priority=""
+_as_cfg_probe_dirs=""
+_as_cfg_unsafe_expand=""
+_as_cfg_suffixes=""
+_as_cfg_trust_env=""
+_as_cfg_has_bare_suffix=""
+_as_cfg_suffix_list=""
+
+# Config sources for debug output
+_as_src_follow_symlinks=""
+_as_src_symlink_priority=""
+_as_src_probe_dirs=""
+_as_src_unsafe_expand=""
+_as_src_suffixes=""
+
+# --- Utilities ---
+
+auto_shebang_dbg() {
+    [ "$_as_debug" = "1" ] || return 0
+    printf '%s: %s\n' "${_as_search_name:-auto-shebang}" "$1" >&2
+}
+
+auto_shebang_die() {
+    local code="$1"; shift
+    printf '%s: %s\n' "${_as_search_name:-auto-shebang}" "$*" >&2
+    exit "$code"
+}
+
+# --- Path normalization ---
+# Converts path to absolute via cd -P / pwd -P in a subshell.
+# Does not change the caller's working directory.
+# Resolves directory-level symlinks (-P); file-level symlinks preserved.
+
+auto_shebang_normalize_path() {
+    local path="$1" dir base abs_dir
+    dir=$(dirname "$path")
+    base=$(basename "$path")
+    abs_dir=$(cd -P "$dir" 2>/dev/null && pwd -P) || return 1
+    printf '%s/%s\n' "$abs_dir" "$base"
+}
+
+# --- Directive parsing ---
+# Scans first 30 lines for auto-shebang-<key>=<value> tokens.
+# Value extends from = to first whitespace (or end of line).
+# Last occurrence of a key wins.
+
+auto_shebang_parse_directives() {
+    local script="$1"
+    local line n key val rest
+
+    _as_d_follow_symlinks=""
+    _as_d_symlink_priority=""
+    _as_d_probe_dirs=""
+    _as_d_unsafe_expand=""
+    _as_d_suffixes=""
+    _as_d_trust_env=""
+
+    [ -f "$script" ] && [ -r "$script" ] || return 0
+
+    n=0
+    while IFS= read -r line || [ -n "$line" ]; do
+        n=$((n + 1))
+        [ "$n" -gt 30 ] && break
+
+        # Strip trailing \r (Windows line endings)
+        line="${line%"$_as_cr"}"
+
+        case "$line" in
+            *auto-shebang-*=*)
+                rest="${line#*auto-shebang-}"
+                key="${rest%%=*}"
+                val="${rest#*=}"
+                # Terminate value at first whitespace (space or tab)
+                val=$(printf '%s' "$val" | sed 's/[[:space:]].*//')
+
+                case "$key" in
+                    follow-symlinks)
+                        case "$val" in
+                            yes|no) _as_d_follow_symlinks="$val" ;;
+                            *) auto_shebang_die 2 "invalid auto-shebang-follow-symlinks: '$val' (must be yes or no)" ;;
+                        esac ;;
+                    symlink-priority)
+                        case "$val" in
+                            real-first|symlink-first) _as_d_symlink_priority="$val" ;;
+                            *) auto_shebang_die 2 "invalid auto-shebang-symlink-priority: '$val' (must be real-first or symlink-first)" ;;
+                        esac ;;
+                    probe-dirs)
+                        _as_d_probe_dirs="$val" ;;
+                    unsafe-expand-probe-dirs)
+                        case "$val" in
+                            yes|no) _as_d_unsafe_expand="$val" ;;
+                            *) auto_shebang_die 2 "invalid auto-shebang-unsafe-expand-probe-dirs: '$val' (must be yes or no)" ;;
+                        esac ;;
+                    suffixes)
+                        _as_d_suffixes="$val" ;;
+                    trust-env)
+                        case "$val" in
+                            yes|no) _as_d_trust_env="$val" ;;
+                            *) auto_shebang_die 2 "invalid auto-shebang-trust-env: '$val' (must be yes or no)" ;;
+                        esac ;;
+                    *)
+                        auto_shebang_dbg "unknown directive: auto-shebang-$key" ;;
+                esac
+                ;;
+        esac
+    done < "$script"
+}
+
+# --- Config building ---
+# Layers: hardcoded defaults < directives < env vars (if trusted).
+
+auto_shebang_build_config() {
+    # Layer 1: defaults
+    _as_cfg_follow_symlinks="no";          _as_src_follow_symlinks="default"
+    _as_cfg_symlink_priority="real-first"; _as_src_symlink_priority="default"
+    _as_cfg_probe_dirs=".:bin";            _as_src_probe_dirs="default"
+    _as_cfg_unsafe_expand="no";            _as_src_unsafe_expand="default"
+    _as_cfg_suffixes=":primary:secondary:tertiary"; _as_src_suffixes="default"
+    _as_cfg_trust_env="yes"
+
+    # Layer 2: directives
+    if [ -n "$_as_d_follow_symlinks" ]; then
+        _as_cfg_follow_symlinks="$_as_d_follow_symlinks"; _as_src_follow_symlinks="directive"
+    fi
+    if [ -n "$_as_d_symlink_priority" ]; then
+        _as_cfg_symlink_priority="$_as_d_symlink_priority"; _as_src_symlink_priority="directive"
+    fi
+    if [ -n "$_as_d_probe_dirs" ]; then
+        _as_cfg_probe_dirs="$_as_d_probe_dirs"; _as_src_probe_dirs="directive"
+    fi
+    if [ -n "$_as_d_unsafe_expand" ]; then
+        _as_cfg_unsafe_expand="$_as_d_unsafe_expand"; _as_src_unsafe_expand="directive"
+    fi
+    if [ -n "$_as_d_suffixes" ]; then
+        _as_cfg_suffixes="$_as_d_suffixes"; _as_src_suffixes="directive"
+    fi
+    if [ -n "$_as_d_trust_env" ]; then
+        _as_cfg_trust_env="$_as_d_trust_env"
+    fi
+
+    # Layer 3: env vars (if trusted)
+    if [ "$_as_cfg_trust_env" = "yes" ]; then
+        if [ -n "${AUTO_SHEBANG_FOLLOW_SYMLINKS:-}" ]; then
+            case "$AUTO_SHEBANG_FOLLOW_SYMLINKS" in
+                1) _as_cfg_follow_symlinks="yes"; _as_src_follow_symlinks="env" ;;
+                0) _as_cfg_follow_symlinks="no"; _as_src_follow_symlinks="env" ;;
+                *) auto_shebang_die 2 "invalid AUTO_SHEBANG_FOLLOW_SYMLINKS: '$AUTO_SHEBANG_FOLLOW_SYMLINKS' (must be 1 or 0)" ;;
+            esac
+        fi
+        if [ -n "${AUTO_SHEBANG_SYMLINK_PRIORITY:-}" ]; then
+            case "$AUTO_SHEBANG_SYMLINK_PRIORITY" in
+                real-first|symlink-first) _as_cfg_symlink_priority="$AUTO_SHEBANG_SYMLINK_PRIORITY"; _as_src_symlink_priority="env" ;;
+                *) auto_shebang_die 2 "invalid AUTO_SHEBANG_SYMLINK_PRIORITY: '$AUTO_SHEBANG_SYMLINK_PRIORITY' (must be real-first or symlink-first)" ;;
+            esac
+        fi
+        if [ -n "${AUTO_SHEBANG_PROBE_DIRS:-}" ]; then
+            _as_cfg_probe_dirs="$AUTO_SHEBANG_PROBE_DIRS"; _as_src_probe_dirs="env"
+        fi
+        if [ -n "${AUTO_SHEBANG_UNSAFE_EXPAND_PROBE_DIRS:-}" ]; then
+            case "$AUTO_SHEBANG_UNSAFE_EXPAND_PROBE_DIRS" in
+                1) _as_cfg_unsafe_expand="yes"; _as_src_unsafe_expand="env" ;;
+                0) _as_cfg_unsafe_expand="no"; _as_src_unsafe_expand="env" ;;
+                *) auto_shebang_die 2 "invalid AUTO_SHEBANG_UNSAFE_EXPAND_PROBE_DIRS (must be 1 or 0)" ;;
+            esac
+        fi
+        if [ -n "${AUTO_SHEBANG_SUFFIXES:-}" ]; then
+            _as_cfg_suffixes="$AUTO_SHEBANG_SUFFIXES"; _as_src_suffixes="env"
+        fi
+    fi
+
+    # Pre-process suffixes: leading : means include bare name
+    case "$_as_cfg_suffixes" in
+        :*) _as_cfg_has_bare_suffix=1; _as_cfg_suffix_list="${_as_cfg_suffixes#:}" ;;
+        *)  _as_cfg_has_bare_suffix=0; _as_cfg_suffix_list="$_as_cfg_suffixes" ;;
+    esac
+}
+
+auto_shebang_dump_config() {
+    auto_shebang_dbg "config: follow-symlinks=$_as_cfg_follow_symlinks ($_as_src_follow_symlinks)"
+    auto_shebang_dbg "config: symlink-priority=$_as_cfg_symlink_priority ($_as_src_symlink_priority)"
+    auto_shebang_dbg "config: probe-dirs=$_as_cfg_probe_dirs ($_as_src_probe_dirs)"
+    auto_shebang_dbg "config: unsafe-expand=$_as_cfg_unsafe_expand ($_as_src_unsafe_expand)"
+    auto_shebang_dbg "config: suffixes=$_as_cfg_suffixes ($_as_src_suffixes)"
+    auto_shebang_dbg "config: trust-env=$_as_cfg_trust_env"
+}
+
+# --- Safe variable substitution ---
+# Expands $NAME and ${NAME} from the environment.
+# Rejects command substitution, backticks, globs.
+
+auto_shebang_expand_vars() {
+    local input="$1"
+    local output="" rest name val
+
+    case "$input" in
+        *'$('*) auto_shebang_die 2 "unsafe expansion: command substitution in probe-dirs: $input" ;;
+    esac
+    # Check for backticks
+    if printf '%s' "$input" | grep -q '`'; then
+        auto_shebang_die 2 "unsafe expansion: backtick in probe-dirs: $input"
+    fi
+
+    rest="$input"
+    while [ -n "$rest" ]; do
+        case "$rest" in
+            *'$'*)
+                output="${output}${rest%%\$*}"
+                rest="${rest#"${rest%%\$*}"}"
+                case "$rest" in
+                    '${'^*'}'*)
+                        # Not a valid var start after {
+                        output="${output}\$"
+                        rest="${rest#\$}"
+                        ;;
+                    '${'*'}'*)
+                        rest="${rest#\$\{}"
+                        name="${rest%%\}*}"
+                        rest="${rest#"$name"}"
+                        rest="${rest#\}}"
+                        case "$name" in
+                            '') auto_shebang_die 2 "unsafe expansion: empty variable name" ;;
+                            [!A-Za-z_]*) auto_shebang_die 2 "unsafe expansion: invalid variable '\${$name}'" ;;
+                        esac
+                        case "$name" in
+                            *[!A-Za-z0-9_]*) auto_shebang_die 2 "unsafe expansion: invalid variable '\${$name}'" ;;
+                        esac
+                        eval "val=\"\${$name:-}\""
+                        output="${output}${val}"
+                        ;;
+                    '$'[A-Za-z_]*)
+                        rest="${rest#\$}"
+                        name=$(expr "x$rest" : 'x\([A-Za-z_][A-Za-z0-9_]*\)') || name=""
+                        if [ -n "$name" ]; then
+                            rest="${rest#"$name"}"
+                            eval "val=\"\${$name:-}\""
+                            output="${output}${val}"
+                        else
+                            output="${output}\$"
+                        fi
+                        ;;
+                    '$'*)
+                        output="${output}\$"
+                        rest="${rest#\$}"
+                        ;;
+                esac
+                ;;
+            *)
+                output="${output}${rest}"
+                rest=""
+                ;;
+        esac
+    done
+
+    printf '%s\n' "$output"
+}
+
+# --- Probe entry expansion ---
+
+auto_shebang_expand_probe_entry() {
+    local entry="$1" walk_dir="$2"
+
+    # Tilde expansion (always)
+    case "$entry" in
+        '~') entry="$HOME" ;;
+        '~/'*) entry="${HOME}/${entry#"~/"}" ;;
+    esac
+
+    # Safe variable expansion (if enabled)
+    if [ "$_as_cfg_unsafe_expand" = "yes" ]; then
+        entry=$(auto_shebang_expand_vars "$entry") || exit $?
+    fi
+
+    case "$entry" in
+        /*) printf '%s\n' "$entry" ;;
+        .)  printf '%s\n' "$walk_dir" ;;
+        *)  printf '%s/%s\n' "$walk_dir" "$entry" ;;
+    esac
+}
+
+# --- Symlink resolution ---
+# Follows symlink chain to real path. Max 40 hops.
+# Relative readlink targets resolved relative to symlink's directory.
+
+auto_shebang_resolve_symlink() {
+    local path="$1"
+    local hops=0 target dir
+
+    while [ -L "$path" ]; do
+        hops=$((hops + 1))
+        [ "$hops" -gt 40 ] && auto_shebang_die 2 "symlink cycle (>40 hops): $1"
+        target=$(readlink "$path") || auto_shebang_die 2 "readlink failed: $path"
+        case "$target" in
+            /*) path="$target" ;;
+            *)  dir=$(dirname "$path"); path="$dir/$target" ;;
+        esac
+    done
+
+    auto_shebang_normalize_path "$path"
+}
+
+# --- Candidate validation ---
+
+auto_shebang_validate_candidate() {
+    local cand="$1"
+    [ -f "$cand" ] && [ -x "$cand" ] && ! [ "$cand" -ef "$_as_self" ]
+}
+
+# --- EXE validation (OVERRIDE / FALLBACK) ---
+# Returns: 0=valid, 126=not executable, 127=not found.
+# Dies (exit 2) for: not a regular file, points to self.
+
+auto_shebang_validate_exe() {
+    local path="$1" label="$2"
+    if [ ! -e "$path" ]; then
+        auto_shebang_dbg "$label: not found: $path"
+        return 127
+    fi
+    if [ ! -f "$path" ]; then
+        auto_shebang_die 2 "$label is not a regular file: $path"
+    fi
+    if [ ! -x "$path" ]; then
+        auto_shebang_dbg "$label: not executable: $path"
+        return 126
+    fi
+    if [ "$path" -ef "$_as_self" ]; then
+        auto_shebang_die 2 "$label points to the resolver itself: $path"
+    fi
+    return 0
+}
+
+# --- Try all suffix variants at a location ---
+
+auto_shebang_try_location() {
+    local loc="$1"
+    local cand suf rest
+
+    [ -d "$loc" ] || return 1
+
+    if [ "$_as_cfg_has_bare_suffix" = 1 ]; then
+        cand="$loc/$_as_search_name"
+        auto_shebang_dbg "  try: $cand"
+        if auto_shebang_validate_candidate "$cand"; then
+            AUTO_SHEBANG_RESULT="$cand"
+            return 0
+        fi
+    fi
+
+    rest="$_as_cfg_suffix_list"
+    while [ -n "$rest" ]; do
+        suf="${rest%%:*}"
+        [ "$suf" = "$rest" ] && rest="" || rest="${rest#*:}"
+        [ -z "$suf" ] && continue
+        cand="$loc/$_as_search_name-$suf"
+        auto_shebang_dbg "  try: $cand"
+        if auto_shebang_validate_candidate "$cand"; then
+            AUTO_SHEBANG_RESULT="$cand"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+# --- Tree walk ---
+
+auto_shebang_walk() {
+    local start_dir="$1"
+    local dir="$start_dir" first_level=1
+    local pd_rest pd_entry expanded parent
+
+    auto_shebang_dbg "walk: starting from $start_dir"
+
+    while :; do
+        pd_rest="$_as_cfg_probe_dirs"
+        while [ -n "$pd_rest" ]; do
+            pd_entry="${pd_rest%%:*}"
+            [ "$pd_entry" = "$pd_rest" ] && pd_rest="" || pd_rest="${pd_rest#*:}"
+            [ -z "$pd_entry" ] && continue
+
+            # Absolute and tilde entries: check only on first walk level
+            if [ "$first_level" = 0 ]; then
+                case "$pd_entry" in
+                    /*|'~'|'~/'*) continue ;;
+                esac
+            fi
+
+            expanded=$(auto_shebang_expand_probe_entry "$pd_entry" "$dir") || exit $?
+            if auto_shebang_try_location "$expanded"; then
+                return 0
+            fi
+        done
+
+        parent=$(dirname "$dir")
+        [ "$parent" = "$dir" ] && break
+        dir="$parent"
+        first_level=0
+    done
+
+    return 1
+}
+
+# --- Resolve (orchestrator) ---
+
+auto_shebang_resolve() {
+    local search_name="$1" script="$2"
+    local script_abs script_dir real_path real_dir symlink_dir
+    local origin1 origin2 rc
+
+    _as_search_name="$search_name"
+    AUTO_SHEBANG_RESULT=""
+
+    # Step 1: Parse directives
+    auto_shebang_parse_directives "$script"
+
+    # Step 2: Build effective config
+    auto_shebang_build_config
+
+    auto_shebang_dbg "script: $script"
+    auto_shebang_dbg "search-name: $search_name"
+    auto_shebang_dump_config
+
+    # Step 3: OVERRIDE_EXE
+    if [ "$_as_cfg_trust_env" = "yes" ] && [ -n "${AUTO_SHEBANG_OVERRIDE_EXE:-}" ]; then
+        auto_shebang_dbg "checking OVERRIDE_EXE: $AUTO_SHEBANG_OVERRIDE_EXE"
+        rc=0
+        auto_shebang_validate_exe "$AUTO_SHEBANG_OVERRIDE_EXE" "AUTO_SHEBANG_OVERRIDE_EXE" || rc=$?
+        if [ "$rc" = 0 ]; then
+            AUTO_SHEBANG_RESULT="$AUTO_SHEBANG_OVERRIDE_EXE"
+            auto_shebang_dbg "resolved via OVERRIDE_EXE: $AUTO_SHEBANG_RESULT"
+            return 0
+        fi
+        exit "$rc"
+    fi
+
+    # Step 4: Normalize script path (subshell - preserves cwd)
+    script_abs=$(auto_shebang_normalize_path "$script") ||
+        auto_shebang_die 127 "cannot resolve directory of: $script"
+    script_dir=$(dirname "$script_abs")
+    auto_shebang_dbg "normalized: $script_abs"
+
+    # Step 5: Resolve symlink origins
+    origin1="$script_dir"
+    origin2=""
+
+    if [ "$_as_cfg_follow_symlinks" = "yes" ]; then
+        if ! command -v readlink >/dev/null 2>&1; then
+            auto_shebang_die 2 "follow-symlinks=yes requires readlink, which is not available"
+        fi
+        if [ -L "$script_abs" ]; then
+            real_path=$(auto_shebang_resolve_symlink "$script_abs") || exit $?
+            real_dir=$(dirname "$real_path")
+            symlink_dir="$script_dir"
+
+            auto_shebang_dbg "real path: $real_path"
+            auto_shebang_dbg "real dir: $real_dir"
+            auto_shebang_dbg "symlink dir: $symlink_dir"
+
+            case "$_as_cfg_symlink_priority" in
+                real-first)    origin1="$real_dir";    origin2="$symlink_dir" ;;
+                symlink-first) origin1="$symlink_dir"; origin2="$real_dir" ;;
+            esac
+
+            [ "$origin1" = "$origin2" ] && origin2=""
+        fi
+    fi
+
+    # Step 6: Walk primary origin
+    if auto_shebang_walk "$origin1"; then
+        auto_shebang_dbg "resolved: $AUTO_SHEBANG_RESULT"
+        return 0
+    fi
+
+    # Step 7: Walk secondary origin
+    if [ -n "$origin2" ]; then
+        if auto_shebang_walk "$origin2"; then
+            auto_shebang_dbg "resolved: $AUTO_SHEBANG_RESULT"
+            return 0
+        fi
+    fi
+
+    # Step 8: FALLBACK_EXE
+    if [ "$_as_cfg_trust_env" = "yes" ] && [ -n "${AUTO_SHEBANG_FALLBACK_EXE:-}" ]; then
+        auto_shebang_dbg "checking FALLBACK_EXE: $AUTO_SHEBANG_FALLBACK_EXE"
+        rc=0
+        auto_shebang_validate_exe "$AUTO_SHEBANG_FALLBACK_EXE" "AUTO_SHEBANG_FALLBACK_EXE" || rc=$?
+        if [ "$rc" = 0 ]; then
+            AUTO_SHEBANG_RESULT="$AUTO_SHEBANG_FALLBACK_EXE"
+            auto_shebang_dbg "resolved via FALLBACK_EXE: $AUTO_SHEBANG_RESULT"
+            return 0
+        fi
+        exit "$rc"
+    fi
+
+    # Step 9: Fail
+    return 1
+}
+
+# --- Main ---
+
+auto_shebang_main() {
+    local search_name mode original_script script_dir
+
+    # Self-identification for loop prevention
+    case "$0" in
+        */*) _as_self="$0" ;;
+        *)   _as_self=$(command -v "$0" 2>/dev/null) || _as_self="$0" ;;
+    esac
+
+    search_name=$(basename "$0")
+    _as_search_name="$search_name"
+    mode="exec"
+    original_script=""
+
+    case "$search_name" in
+        auto-shebang)
+            case "${1:-}" in
+                --version)
+                    printf '%s\n' "auto-shebang $AUTO_SHEBANG_VERSION"
+                    exit 0
+                    ;;
+                --resolve)
+                    [ $# -ge 3 ] || auto_shebang_die 2 "usage: auto-shebang --resolve <name> <script>"
+                    search_name="$2"; _as_search_name="$search_name"
+                    original_script="$3"
+                    mode="resolve"
+                    ;;
+                --check)
+                    [ $# -ge 3 ] || auto_shebang_die 2 "usage: auto-shebang --check <name> <script>"
+                    search_name="$2"; _as_search_name="$search_name"
+                    original_script="$3"
+                    mode="check"
+                    ;;
+                --*)
+                    auto_shebang_die 2 "unknown flag: $1 (use --resolve, --check, or --version)"
+                    ;;
+                '')
+                    printf '%s\n' "auto-shebang $AUTO_SHEBANG_VERSION -- language-agnostic interpreter resolver"
+                    printf '\n'
+                    printf '%s\n' "Usage:"
+                    printf '%s\n' "  auto-shebang --resolve <name> <script>  Print interpreter path"
+                    printf '%s\n' "  auto-shebang --check <name> <script>    Test if resolvable"
+                    printf '%s\n' "  auto-shebang --version                  Print version"
+                    printf '\n'
+                    printf '%s\n' "Typically invoked via language-specific alias:"
+                    printf '%s\n' "  ln -s auto-shebang auto-python"
+                    printf '%s\n' "  #!/usr/bin/env /path/to/auto-python"
+                    printf '\n'
+                    printf '%s\n' "https://github.com/manderso/auto-shebang"
+                    exit 0
+                    ;;
+                *)
+                    auto_shebang_die 2 "unknown argument: $1 (use --resolve, --check, or --version)"
+                    ;;
+            esac
+            ;;
+        *)
+            # Alias mode -- transparent proxy, no flags
+            if [ $# -eq 0 ]; then
+                printf '%s\n' "$search_name (auto-shebang $AUTO_SHEBANG_VERSION) -- interpreter resolver"
+                printf '\n'
+                printf '%s\n' "Usage as shebang:"
+                printf '%s\n' "  #!/usr/bin/env /path/to/$search_name"
+                printf '%s\n' "  #!/usr/bin/env $search_name"
+                printf '\n'
+                printf '%s\n' "Usage from command line:"
+                printf '%s\n' "  $search_name /path/to/script [args...]"
+                exit 0
+            fi
+            original_script="$1"
+            shift
+            mode="exec"
+            ;;
+    esac
+
+    # Resolve
+    if ! auto_shebang_resolve "$search_name" "$original_script"; then
+        script_dir=$(dirname "$original_script")
+        printf '%s: no interpreter found for: %s\n' "$search_name" "$original_script" >&2
+        printf '\n' >&2
+        printf 'Searched from %s to / for:\n' "$script_dir" >&2
+        printf '  %s (suffixes: %s)\n' "$search_name" "$_as_cfg_suffixes" >&2
+        printf '  in probe-dirs: %s\n' "$_as_cfg_probe_dirs" >&2
+        printf '\n' >&2
+        printf 'Create an interpreter symlink:\n' >&2
+        printf '  ln -sf /path/to/interpreter <project>/bin/%s\n' "$search_name" >&2
+
+        case "$mode" in
+            check) exit 1 ;;
+            *)     exit 127 ;;
+        esac
+    fi
+
+    # Dispatch on mode
+    case "$mode" in
+        exec)
+            exec "$AUTO_SHEBANG_RESULT" "$original_script" "$@"
+            ;;
+        resolve)
+            printf '%s\n' "$AUTO_SHEBANG_RESULT"
+            exit 0
+            ;;
+        check)
+            exit 0
+            ;;
+    esac
+}
+
+# --- Source guard ---
+
+[ "${AUTO_SHEBANG_LIB:-0}" = "1" ] || auto_shebang_main "$@"

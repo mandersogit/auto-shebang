@@ -1,0 +1,20 @@
+# Editor / IDE
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+.cursor/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Python (for commit-helper and any future tooling)
+__pycache__/
+*.pyc
+*.pyo
+local.venv/
+
+# Test artifacts
+/tmp/
