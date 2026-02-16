@@ -8,7 +8,7 @@
 # directory tree, looking for interpreter symlinks whose name matches
 # the resolver's invocation name (busybox pattern).
 #
-# See: https://github.com/manderso/auto-shebang
+# See: https://github.com/mandersogit/auto-shebang
 
 AUTO_SHEBANG_VERSION="1.0"
 AUTO_SHEBANG_RESULT=""
@@ -583,7 +583,7 @@ auto_shebang_usage() {
     printf '%s\n' "  ln -s auto-shebang auto-python"
     printf '%s\n' "  #!/usr/bin/env /path/to/auto-python"
     printf '\n'
-    printf '%s\n' "https://github.com/manderso/auto-shebang"
+    printf '%s\n' "https://github.com/mandersogit/auto-shebang"
 }
 
 auto_shebang_main() {
