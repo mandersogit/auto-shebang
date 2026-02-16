@@ -1,149 +1,169 @@
 # auto-shebang
 
-A single-file, language-agnostic interpreter resolver for scripts. No PATH gambling, no hardcoded shebangs.
+Upgrade every script's interpreter by changing one symlink. A portable, language-agnostic resolver for shebang-driven scripts — no PATH dependency, no hardcoded paths.
 
 ## The problem
 
-Scripts that use an interpreter (Python, Ruby, Node, Perl, etc.) need to find that interpreter. The standard options are all bad:
+Scripts that use an interpreter — Python, Ruby, Node, Perl — need to find it. You've probably tried the standard approaches and hit their limits.
 
-| Approach | Failure mode |
-|---|---|
-| `#!/usr/bin/env python3` | Relies on `$PATH`, which varies across users, machines, cron jobs, SSH sessions, and CI environments |
-| `#!/opt/specific/path/python3` | Hardcodes a machine-specific path into every script |
-| Virtual environments | Correct for project dependencies, but user-level tools and automation shouldn't live in a venv |
+**`#!/usr/bin/env python3`** relies on `$PATH`. PATH varies between users on the same machine, between interactive and non-interactive shells, between SSH sessions and cron jobs, between `sudo` and the invoking user's shell, and between CI environments and developer laptops. A script that works for one person silently finds a different (or no) interpreter for another. This is the most common failure mode, and it's invisible until something breaks.
+
+**`#!/opt/python3.12/bin/python3`** hardcodes a machine-specific path into every script. It works until the interpreter is upgraded, moved, or the script is deployed to a different machine. Then every shebang needs editing. In a project with hundreds of scripts accumulated over years by a growing team, upgrading from Python 3.11 to 3.12 means touching every file. That's not a find-and-replace — it's a PR per repository, code review, merge conflicts with in-flight work, coordinated rollouts across teams, and the near-certainty that some scripts get missed and break silently weeks later. The maintenance burden scales with the number of scripts and never gets easier.
+
+**Virtual environments** solve library isolation but don't solve interpreter location for user-level tools, automation scripts, editor hooks, CI glue, or anything that isn't a managed project with its own venv.
+
+auto-shebang grew out of managing interpreter versions across a large enterprise codebase with hundreds of scripts. It eliminates this entire class of work.
 
 ## The solution
 
-`auto-shebang` finds the interpreter by walking up the directory tree from the calling script, looking for **symlinks whose name matches the resolver's invocation name**. The name is intentional and unambiguous — it never collides with system-installed interpreters.
+Every script in a project resolves to the same interpreter through one symlink. Upgrading 300 scripts from Python 3.11 to 3.12 is one command:
 
-One script handles every language via the busybox pattern: install `auto-shebang` once, then create language-specific symlinks:
-
-```bash
-ln -s auto-shebang ~/.local/bin/auto-python
-ln -s auto-shebang ~/.local/bin/auto-ruby
-ln -s auto-shebang ~/.local/bin/auto-node
+```sh
+ln -sf /opt/python3.12/bin/python3 ~/my-project/bin/auto-python
 ```
 
-When invoked as `auto-python`, it searches for `auto-python` interpreter symlinks. When invoked as `auto-ruby`, it searches for `auto-ruby`. Same code, different behavior.
+Rolling back is the same command with the old path. No files edited, no PRs, no merge conflicts, no scripts missed. You never touch a shebang line again when the interpreter changes.
 
-### Resolution algorithm
+**How it works:** your shebang points at `auto-python` — a symlink to the `auto-shebang` resolver. When a script runs, the resolver walks up the directory tree from the script's location, finds a symlink named `auto-python` that points to the real Python binary, and exec's it. The resolver replaces itself entirely — it's as if the shebang pointed directly at Python.
 
-Starting from the script's directory and walking up to the filesystem root:
+```
+your-project/
+├── bin/
+│   └── auto-python → /opt/python3.12/bin/python3    # one symlink
+└── scripts/
+    ├── deploy.py      ← shebang: #!/usr/bin/env /path/to/auto-python
+    ├── test-runner.py  ← same shebang
+    └── migrate.py      ← same shebang
+```
 
-1. **At each directory level**, check:
-   - The directory itself
-   - Each subdirectory in the probe list (default: `bin`)
+One symlink controls every script below it in the tree. The search is deterministic, relative to the script's location, and independent of `$PATH`.
 
-2. **Within each location**, try these names in order:
-   - `auto-python` (or whatever the invocation name is)
-   - `auto-python-primary`
-   - `auto-python-secondary`
-   - `auto-python-tertiary`
+auto-shebang is language-agnostic via the **busybox pattern**: when invoked as `auto-python`, it searches for `auto-python` symlinks. When invoked as `auto-ruby`, it searches for `auto-ruby`. Same code, different behavior:
 
-3. If the tree walk is exhausted, check `$AUTO_PYTHON` (derived from the invocation name) as a final explicit fallback.
-
-4. **Fail with a clear error message** — never silently falls back to an unknown interpreter.
-
-The first candidate that exists, resolves to a real file (not a dangling symlink), is executable, and is not the resolver itself wins.
+```sh
+ln -s auto-shebang /usr/local/bin/auto-python
+ln -s auto-shebang /usr/local/bin/auto-ruby
+ln -s auto-shebang /usr/local/bin/auto-node
+```
 
 ## Quick start
 
-### 1. Install auto-shebang
+### 1. Install auto-shebang and create a language alias
 
-```bash
-cp auto-shebang ~/.local/bin/auto-shebang
-chmod +x ~/.local/bin/auto-shebang
-ln -s auto-shebang ~/.local/bin/auto-python
+```sh
+cp auto-shebang /usr/local/bin/auto-shebang
+chmod +x /usr/local/bin/auto-shebang
+ln -s auto-shebang /usr/local/bin/auto-python
 ```
 
-Or wherever your team keeps shared tools (`/opt/tools/bin/`, `/projects/shared/bin/`, etc.).
+### 2. Create an interpreter symlink in your project
 
-### 2. Create an interpreter symlink
-
-Place a symlink named `auto-python` where the tree walk will find it:
-
-```bash
-mkdir -p ~/project/bin
-ln -sf /opt/python3.12/bin/python3 ~/project/bin/auto-python
+```sh
+mkdir -p ~/my-project/bin
+ln -s /opt/python3.12/bin/python3 ~/my-project/bin/auto-python
 ```
 
 ### 3. Use it as a shebang
 
 ```python
-#!/usr/bin/env /home/user/.local/bin/auto-python
+#!/usr/bin/env /usr/local/bin/auto-python
 
 import sys
-print(f"Running: {sys.executable}")
+print(f"Running under: {sys.executable}")
 ```
 
-`/usr/bin/env` acts as a binary trampoline: macOS requires shebang targets to be compiled binaries (not scripts), and `env` satisfies this. On Linux the trampoline is unnecessary but harmless. One pattern for both platforms.
+When this script runs, `env` invokes `/usr/local/bin/auto-python` (which is really `auto-shebang`). The resolver sees it was invoked as `auto-python`, walks up from the script's directory, finds `bin/auto-python → /opt/python3.12/bin/python3`, and exec's it.
 
-**Alternative — PATH-based resolver lookup:**
+## Living with auto-shebang
+
+The quick start is a one-time setup cost. This section describes the ongoing experience — what you get in return.
+
+### Upgrading the interpreter
+
+```sh
+ln -sf /opt/python3.13/bin/python3 ~/my-project/bin/auto-python
+```
+
+Every script below `my-project/` picks up the new interpreter immediately. No files to edit. No PRs. No rollout plan.
+
+### Rolling back
+
+```sh
+ln -sf /opt/python3.12/bin/python3 ~/my-project/bin/auto-python
+```
+
+Same command, old path. Instant rollback, no deployment needed. If the new interpreter breaks something, recovery takes seconds.
+
+### Staged rollout
+
+Test a new interpreter without committing to it. Place it as a secondary symlink alongside the current one:
+
+```sh
+ln -s /opt/python3.13/bin/python3 ~/my-project/bin/auto-python-secondary
+```
+
+auto-shebang tries candidates in priority order: bare name first (`auto-python`), then `-primary`, `-secondary`, `-tertiary`. Your scripts continue using the current interpreter. To test a specific script against the new one, temporarily override the suffix order:
+
+```sh
+AUTO_SHEBANG_SUFFIXES=secondary ./scripts/deploy.py
+```
+
+When you're satisfied, promote it:
+
+```sh
+ln -sf /opt/python3.13/bin/python3 ~/my-project/bin/auto-python
+rm ~/my-project/bin/auto-python-secondary
+```
+
+### Adding a new language
+
+One alias at the install location, one interpreter symlink in the project:
+
+```sh
+ln -s auto-shebang /usr/local/bin/auto-ruby
+ln -s /opt/ruby3.2/bin/ruby ~/my-project/bin/auto-ruby
+```
+
+Every Ruby script you write from now on uses the same shebang pattern. Upgrading Ruby works exactly like upgrading Python.
+
+### Adding a new script
+
+Write the shebang, write the script. The interpreter is already configured — zero per-script setup:
 
 ```python
-#!/usr/bin/env auto-python
+#!/usr/bin/env /usr/local/bin/auto-python
+print("It just works.")
 ```
 
-Uses `$PATH` to find the resolver (but the resolver still finds the interpreter *without* using `$PATH`). Useful when the resolver's absolute path varies across machines.
+### Per-machine variation
 
-**Alternative — polyglot preamble (Python-specific):**
+The symlink name is the same everywhere; what it points to can differ per machine. Workstations point to a fast local interpreter, shared servers point to a network-mounted one, CI images point to the build environment's copy. Scripts don't know or care — they all say `auto-python` and get the right interpreter for where they're running.
 
-```python
-#!/bin/bash
-"true" '''\'
-exec auto-python "$0" "$@"
-'''
+### Debugging resolution
 
-import sys
-print(f"Running: {sys.executable}")
+When something doesn't resolve as expected:
+
+```sh
+auto-shebang --debug --resolve auto-python ./scripts/deploy.py
 ```
 
-The preamble is simultaneously valid bash and valid Python. Use when neither the resolver's absolute path nor `#!/usr/bin/env` is viable.
+This prints the full resolution trace to stderr: effective configuration (with sources for each setting), every candidate checked, and the result.
 
-## How it works
-
-### Example resolution
-
-Script at `/home/user/project/lib/tools/deploy.py`, invoked via `auto-python`:
-
-```
-/home/user/project/lib/tools/auto-python
-/home/user/project/lib/tools/auto-python-primary
-/home/user/project/lib/tools/auto-python-secondary
-/home/user/project/lib/tools/auto-python-tertiary
-/home/user/project/lib/tools/bin/auto-python
-/home/user/project/lib/tools/bin/auto-python-primary
-...
-/home/user/project/lib/auto-python
-/home/user/project/lib/bin/auto-python
-...
-/home/user/project/auto-python
-/home/user/project/bin/auto-python              ← typical match
-...
-(continues to /)
-$AUTO_PYTHON                                     ← env var fallback
-FAIL                                             ← actionable error
-```
-
-### Self-detection
-
-The resolver skips itself during the tree walk. If `auto-python` (the resolver symlink) is at `~/.local/bin/auto-python` and the tree walk reaches that directory, it detects the candidate is itself (by inode comparison) and moves on. No infinite loops.
+---
 
 ## Common layouts
 
-### User-level tools (personal scripts, editor hooks)
+### Personal scripts and editor hooks
 
 ```
 ~/.cursor/
 ├── bin/
 │   └── auto-python → /opt/python3.12/bin/python3
 └── hooks/
-    └── transcript.py  (shebang: #!/usr/bin/env /home/user/.local/bin/auto-python)
+    └── transcript.py
 ```
 
-Resolution: `transcript.py` → walk up to `.cursor/` → `bin/auto-python` → found.
-
-### Project scripts
+### Project scripts (most common)
 
 ```
 my-project/
@@ -151,12 +171,27 @@ my-project/
 │   └── auto-python → /opt/python3.12/bin/python3
 └── scripts/
     ├── deploy.py
-    └── test-runner.py
+    ├── test-runner.py
+    └── migrate.py
 ```
 
-Resolution: `deploy.py` → walk up to `my-project/` → `bin/auto-python` → found.
+### Multi-language project
 
-### Deep nesting (monorepo)
+```
+my-project/
+├── bin/
+│   ├── auto-python → /opt/python3.12/bin/python3
+│   ├── auto-ruby   → /opt/ruby3.2/bin/ruby
+│   └── auto-node   → /opt/node20/bin/node
+├── scripts/
+│   └── deploy.py
+├── config/
+│   └── generate.rb
+└── tools/
+    └── build.js
+```
+
+### Monorepo with deep nesting
 
 ```
 monorepo/
@@ -168,127 +203,261 @@ monorepo/
             └── migrate.py
 ```
 
-Resolution: `migrate.py` → walks up through `scripts/`, `api/`, `services/` → reaches `monorepo/` → `bin/auto-python` → found.
+`migrate.py` walks up through `scripts/`, `api/`, `services/`, and finds the interpreter at `monorepo/bin/auto-python`.
 
-### Multi-language project
-
-```
-my-project/
-├── bin/
-│   ├── auto-python → /opt/python3.12/bin/python3
-│   ├── auto-ruby → /opt/ruby3.2/bin/ruby
-│   └── auto-node → /opt/node20/bin/node
-├── scripts/
-│   ├── deploy.py      (shebang: #!/usr/bin/env .../auto-python)
-│   └── provision.rb   (shebang: #!/usr/bin/env .../auto-ruby)
-└── tools/
-    └── build.js       (shebang: #!/usr/bin/env .../auto-node)
-```
-
-One `bin/` directory, one symlink per language.
-
-## Priority suffixes
-
-Multiple interpreters can coexist with a well-defined fallback chain:
+### Multi-tier interpreter fallback
 
 ```
 bin/
-├── auto-python             → /opt/local/python3.12/bin/python3  (fast local)
-├── auto-python-primary     → /net/shared/python3.12/bin/python3 (network)
-├── auto-python-secondary   → /opt/python3.11/bin/python3        (older version)
-└── auto-python-tertiary    → /emergency/python3/bin/python3     (last resort)
+├── auto-python           → /opt/local/python3/bin/python3       # fast local
+├── auto-python-primary   → /net/shared/python3/bin/python3      # network share
+└── auto-python-secondary → /opt/python3.11/bin/python3          # older fallback
 ```
 
-At each directory level, `auto-python` is tried first. If it doesn't exist or is a dangling symlink (local disk not mounted), `auto-python-primary` is tried next, and so on.
+On machines with the local install, it's fast. On machines without it (dangling symlink), the network interpreter is used automatically.
 
-**Use case:** `auto-python` points to a fast interpreter on local SSD. `auto-python-primary` points to the same version on a network share. On machines with the local install, it's fast. On machines without it, it still works via the network — no configuration changes needed.
+## Shebang patterns
 
-## Changing the interpreter
+**Recommended — absolute path to the resolver:**
 
-Update one symlink, and every script below it in the tree picks up the change immediately:
-
-```bash
-ln -sf /opt/python3.13/bin/python3 ~/project/bin/auto-python
+```python
+#!/usr/bin/env /usr/local/bin/auto-python
 ```
 
-No files to edit, no scripts to re-deploy.
+`/usr/bin/env` is used as a binary trampoline. macOS requires shebang targets to be compiled binaries (not scripts). `env` satisfies this while passing through the absolute resolver path. On Linux the trampoline is unnecessary but harmless. One shebang pattern for both platforms.
+
+This avoids `$PATH` entirely. The resolver's path is absolute and machine-specific; the resolver finds the interpreter via relative tree walk. The combination gives reproducibility without fragility.
+
+**Alternative — PATH-based resolver lookup:**
+
+```python
+#!/usr/bin/env auto-python
+```
+
+Uses `$PATH` to find the resolver, but the resolver still finds the interpreter without `$PATH`. Acceptable for teams that standardize their members' PATH. Not recommended for general distribution.
+
+**Note:** Shebang line length limits vary by platform (128-256 bytes on Linux depending on kernel version). If the absolute path to the resolver exceeds this, the PATH-based pattern is a pragmatic fallback.
+
+## Modes of operation
+
+### Exec mode (default)
+
+The normal shebang use case. The resolver finds the interpreter and replaces itself via `exec`. The original script path is passed to the interpreter unchanged — your script sees the same `argv[0]`, `__file__`, etc., as if auto-shebang wasn't involved.
+
+```sh
+./scripts/deploy.py                          # via shebang
+auto-python ./scripts/deploy.py arg1 arg2    # explicit
+```
+
+### Resolve mode
+
+Print the resolved interpreter path to stdout without executing anything. Useful for build scripts, CI pipelines, and tooling that needs the interpreter path programmatically.
+
+```sh
+interpreter=$(auto-shebang --resolve auto-python ./scripts/deploy.py)
+```
+
+Safe to run against untrusted scripts — no code from the script is executed.
+
+### Check mode
+
+Exit 0 if an interpreter can be resolved, non-zero if not. Produces no output. Designed for conditionals and CI gating.
+
+```sh
+if auto-shebang --check auto-python ./scripts/deploy.py; then
+    echo "Ready to deploy"
+fi
+```
+
+Safe to run against untrusted scripts.
+
+### Library mode
+
+Source `auto-shebang` into your own shell script to use its resolver as a callable function:
+
+```sh
+#!/bin/sh
+AUTO_SHEBANG_LIB=1
+. /path/to/auto-shebang
+
+if auto_shebang_resolve "auto-python" "$1"; then
+    echo "Found: $AUTO_SHEBANG_RESULT"
+    export PYTHONUNBUFFERED=1
+    exec "$AUTO_SHEBANG_RESULT" "$1"
+else
+    echo "No interpreter found" >&2
+    exit 1
+fi
+```
+
+`AUTO_SHEBANG_LIB=1` prevents auto-execution when sourced. In library mode, internal errors are contained in a subshell — they return an exit code instead of terminating your script.
+
+## How the algorithm works
+
+### The tree walk
+
+Given a script at `/home/user/project/lib/tools/deploy.py`, invoked as `auto-python`:
+
+The resolver starts at the script's directory and walks up one directory at a time until it reaches the filesystem root. At each level, it checks a configurable list of **probe locations** (default: the directory itself, then `bin/`). Within each location, it tries candidate names in **priority order**:
+
+```
+/home/user/project/lib/tools/auto-python
+/home/user/project/lib/tools/auto-python-primary
+/home/user/project/lib/tools/auto-python-secondary
+/home/user/project/lib/tools/auto-python-tertiary
+/home/user/project/lib/tools/bin/auto-python
+/home/user/project/lib/tools/bin/auto-python-primary
+    ...
+/home/user/project/lib/auto-python
+/home/user/project/lib/bin/auto-python
+    ...
+/home/user/project/auto-python
+/home/user/project/bin/auto-python              ← typical match
+    ...
+(continues to /)
+```
+
+A candidate wins if it: exists on disk (not a dangling symlink), is a regular file (`-f`), is executable (`-x`), and is not the resolver itself (detected by inode comparison via `[ file1 -ef file2 ]`).
+
+If the walk reaches `/` without finding anything, resolution fails with an actionable error message that reports exactly what was searched and where.
+
+### Why this works
+
+The search name (`auto-python`) is intentional — no system ships a binary called `auto-python`. Walking all the way to `/` is safe because the name is the namespace. There's no risk of accidentally matching a system binary.
+
+The walk is fast: just stat calls. A typical project nested 5 levels deep with the default probe-dirs (`.:bin`) means ~40 stat calls — negligible even on networked filesystems. No caching is needed, and none is done.
+
+### Path normalization
+
+The script path is normalized to an absolute path before the walk begins, using `cd -P "$(dirname "$path")" && pwd -P` in a subshell. The `-P` flag resolves directory-level symlinks, so the walk origin is always a physical directory. The caller's working directory is not affected.
+
+### Self-detection
+
+The resolver skips itself during the tree walk. If the walk encounters a candidate that is the resolver (by inode comparison with `[ -ef ]`), it moves on. No infinite loops, even when the resolver's install location is an ancestor of the script.
+
+### Priority suffixes
+
+Multiple interpreter symlinks coexist with a defined fallback chain. At each directory level, the bare name is tried first, then `-primary`, `-secondary`, `-tertiary`. If the bare name is a dangling symlink (e.g., local disk not mounted), the next suffix is tried automatically.
+
+The suffix list is configurable via the `auto-shebang-suffixes` directive or `AUTO_SHEBANG_SUFFIXES` env var.
 
 ## Configuration
 
-### `AUTO_SHEBANG_PROBE_DIRS`
+auto-shebang has three layers of configuration, applied in priority order:
 
-Colon-separated list of subdirectory names to check at each tree level. Default: `bin`.
+1. **Hardcoded defaults** (lowest) — set by the auto-shebang project
+2. **Script directives** — set by the script author, embedded in the script
+3. **Environment variables** (highest) — set by the deployer or runner
 
-```bash
-AUTO_SHEBANG_PROBE_DIRS=bin:venv/bin:scripts ./myscript.py
+For design rationale behind these choices, see [DESIGN.md](DESIGN.md).
+
+### Script directives
+
+The resolver scans the first 30 lines of the target script for inline directives. A directive is recognized when a line contains `auto-shebang-<key>=<value>`, where `<key>` is a known directive name. The pattern can appear anywhere in the line — the comment character doesn't matter, so it works for any language:
+
+```python
+#!/usr/bin/env /path/to/auto-python
+# auto-shebang-probe-dirs=.:bin:tools
+# auto-shebang-follow-symlinks=no
 ```
 
-### `AUTO_SHEBANG_DEBUG`
-
-Set to `1` to print the full resolution trace to stderr:
-
-```bash
-$ AUTO_SHEBANG_DEBUG=1 auto-python ./myscript.py
-auto-python: script: ./myscript.py
-auto-python: script_dir: /home/user/project
-auto-python: search_name: auto-python
-auto-python: probe_dirs: bin
-auto-python:   skip: /home/user/project/auto-python
-auto-python:   skip: /home/user/project/auto-python-primary
-...
-auto-python: resolved: /home/user/project/bin/auto-python
+```javascript
+#!/usr/bin/env /path/to/auto-node
+// auto-shebang-probe-dirs=.:bin
 ```
 
-### Language-specific env vars
+The value extends from `=` to the first whitespace character. Trailing comments are fine. If the same key appears multiple times, the last occurrence wins.
 
-The resolver derives an environment variable name from its invocation name by uppercasing and replacing hyphens with underscores:
+#### Available directives
 
-| Invocation | Env var |
+| Directive | Default | Values | Purpose |
+|---|---|---|---|
+| `auto-shebang-probe-dirs` | `.:bin` | Colon-separated list | Locations to check at each tree-walk level |
+| `auto-shebang-suffixes` | `:primary:secondary:tertiary` | Colon-separated list | Suffix search order (leading `:` = include bare name) |
+| `auto-shebang-follow-symlinks` | `no` | `yes` or `no` | Enable dual-origin search (see [Advanced](#advanced-dual-origin-search)) |
+| `auto-shebang-symlink-priority` | `real-first` | `real-first` or `symlink-first` | Which origin to search first |
+| `auto-shebang-trust-env` | `yes` | `yes` or `no` | Honor `AUTO_SHEBANG_*` env vars |
+| `auto-shebang-unsafe-expand-probe-dirs` | `no` | `yes` or `no` | Expand `$VAR` in probe-dirs |
+
+**`probe-dirs`** controls which locations are checked and in what order. `.` means the directory itself. What you specify is what you get — no implicit entries. Also supports absolute paths (`/opt/interpreters`), tilde paths (`~/bin`), and relative paths (`../lib`).
+
+**`suffixes`** controls the candidate name search order. A leading `:` means "include the bare name." `:primary` tries bare then `-primary`. `primary:secondary` skips the bare name.
+
+**`trust-env`** when set to `no`, ignores all `AUTO_SHEBANG_*` env vars except `AUTO_SHEBANG_DEBUG`. This directive has no corresponding env var — an env var that disables its own trust would be pointless.
+
+**`unsafe-expand-probe-dirs`** when `yes`, expands `$NAME` and `${NAME}` in probe-dirs from the environment. Only simple variable references — command substitution (`$()`), backticks, and other metacharacters are rejected. Tilde expansion is always available regardless of this setting.
+
+### Environment variables
+
+Each directive has a corresponding env var (except `trust-env`). When set, the env var overrides the directive. Ignored when `trust-env=no`.
+
+| Variable | Overrides | Values |
+|---|---|---|
+| `AUTO_SHEBANG_PROBE_DIRS` | `probe-dirs` | Colon-separated list |
+| `AUTO_SHEBANG_SUFFIXES` | `suffixes` | Colon-separated list |
+| `AUTO_SHEBANG_FOLLOW_SYMLINKS` | `follow-symlinks` | `1` or `0` |
+| `AUTO_SHEBANG_SYMLINK_PRIORITY` | `symlink-priority` | `real-first` or `symlink-first` |
+| `AUTO_SHEBANG_UNSAFE_EXPAND_PROBE_DIRS` | `unsafe-expand-probe-dirs` | `1` or `0` |
+
+Boolean env vars use `1`/`0` (not `yes`/`no`). Invalid values exit 2.
+
+| Variable | Purpose |
 |---|---|
-| `auto-python` | `$AUTO_PYTHON` |
-| `auto-ruby` | `$AUTO_RUBY` |
-| `auto-node` | `$AUTO_NODE` |
+| `AUTO_SHEBANG_OVERRIDE_EXE` | Skip tree walk — use this interpreter (checked first) |
+| `AUTO_SHEBANG_FALLBACK_EXE` | Use if tree walk finds nothing (checked last) |
+| `AUTO_SHEBANG_DEBUG` | Full resolution trace on stderr (always honored, even when `trust-env=no`) |
+| `AUTO_SHEBANG_LIB` | Set to `1` when sourcing as library (prevents auto-execution) |
 
-These are checked after the tree walk is exhausted — they act as a fallback, not an override:
+`OVERRIDE_EXE` and `FALLBACK_EXE` are validated like any candidate: must exist, be a regular file, be executable, and not be the resolver itself. A missing path exits 127; a non-executable path exits 126.
 
-```bash
-AUTO_PYTHON=/opt/debug-python/bin/python3 ./myscript.py
+## Advanced: dual-origin search
+
+By default, the tree walk starts from the directory of the script as invoked. If the script is a symlink, the walk starts from the symlink's directory, not the real file's directory.
+
+When a script is deployed via symlinks (e.g., `deploy/tool.py → /src/project/tool.py`), the interpreter might be near the real file rather than near the symlink. The `auto-shebang-follow-symlinks=yes` directive enables **dual-origin search**: the resolver follows the symlink chain to find the real file, then searches from *both* locations.
+
+```
+/src/project/
+├── bin/
+│   └── auto-python → /opt/python3/bin/python3
+└── tool.py                                        # real file
+
+/deploy/bin/
+└── tool.py → /src/project/tool.py                # deployment symlink
 ```
 
-## Error messages
+With `follow-symlinks=yes` and the default `real-first` priority, the resolver searches from `/src/project/` first, then from `/deploy/bin/`. With `symlink-first`, the order reverses.
 
-When no interpreter is found:
+This feature requires `readlink`. If `readlink` is not available and `follow-symlinks=yes` is set, the resolver exits with error 2 — it does not silently fall back.
 
-```
-auto-python: no valid interpreter found for: ./scripts/deploy.py
+## Exit codes
 
-Searched from /home/user/project/scripts to / for:
-  auto-python, auto-python-primary, auto-python-secondary, auto-python-tertiary
-In each directory and subdirectories: bin
-
-Expected location (nearest to script):
-  /home/user/project/scripts/../bin/auto-python
-
-Create the interpreter symlink:
-  mkdir -p "/home/user/project/bin"
-  ln -sf /path/to/interpreter "/home/user/project/bin/auto-python"
-
-Or set $AUTO_PYTHON for a one-off override:
-  AUTO_PYTHON=/path/to/interpreter ./scripts/deploy.py
-```
+| Code | Meaning |
+|------|---------|
+| 0 | Success — interpreter found |
+| 1 | Not found (check mode only) |
+| 2 | Configuration error — invalid directive, bad arguments, missing `readlink` |
+| 126 | Interpreter found but not executable |
+| 127 | Not found (exec and resolve modes) |
 
 ## Platform support
 
 | Platform | Status |
-|---|---|
-| Linux | Fully supported |
-| macOS | Fully supported (bash 3.2+) |
-| Windows (WSL) | Works in WSL and Git Bash |
-| Windows (native) | Not supported — use WSL or Git Bash |
+|----------|--------|
+| Linux | Fully supported. Tested under dash and bash. |
+| macOS | Fully supported. Use `#!/usr/bin/env /path/to/auto-python`. |
+| Windows (WSL/Git Bash) | Works under WSL and Git Bash. |
+| Windows (native) | Not supported — shebangs are a Unix concept. |
 
-The standard shebang `#!/usr/bin/env /path/to/auto-python` works on both Linux and macOS. auto-shebang is written in POSIX sh — it runs under dash, ash, bash, ksh, zsh, and busybox sh. It does **not** use `readlink -f` or other GNU-specific tools.
+auto-shebang is written in POSIX sh. It runs under dash, ash, bash, ksh, zsh, and busybox sh. In its default configuration, it has no external dependencies beyond standard POSIX utilities.
 
-> **Note:** On Linux, `#!/path/to/auto-python` also works directly (the kernel handles script-as-interpreter). macOS requires the shebang target to be a compiled binary, which is why `env` is used as a trampoline. The `env` form works on both, so we recommend it universally.
+## Testing
+
+```sh
+sh tests/run-tests.sh
+```
+
+The test suite creates a temporary workspace with fake interpreters, project structures, and test scripts, then exercises all features: CLI interface, tree walk resolution, directive parsing, configuration precedence, suffix handling, override/fallback behavior, dual-origin search, variable expansion, library mode, error messages, and edge cases (spaces in paths, colons in directory names, leading-dash filenames). 63 tests, portable across POSIX shells.
 
 ## License
 
