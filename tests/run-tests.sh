@@ -153,55 +153,55 @@ ln -s "$W/fake-bin/fake-python" "$W/project/bin/auto-python-primary"
 ln -s "$W/fake-bin/fake-python" "$W/project/bin/auto-python-custom"
 
 cat > "$W/project/scripts/plain.py" << 'S'
-#!/usr/bin/env auto-python
+#!/usr/bin/env /usr/local/bin/auto-python
 print("plain")
 S
 
 cat > "$W/project/scripts/with-probe-dirs.py" << 'S'
-#!/usr/bin/env auto-python
+#!/usr/bin/env /usr/local/bin/auto-python
 # auto-shebang-probe-dirs=bin
 print("probe-dirs")
 S
 
 cat > "$W/project/scripts/trust-no.py" << 'S'
-#!/usr/bin/env auto-python
+#!/usr/bin/env /usr/local/bin/auto-python
 # auto-shebang-trust-env=no
 print("trust-no")
 S
 
 cat > "$W/project/scripts/bad-bool.py" << 'S'
-#!/usr/bin/env auto-python
+#!/usr/bin/env /usr/local/bin/auto-python
 # auto-shebang-follow-symlinks=maybe
 S
 
 cat > "$W/project/scripts/custom-suffix.py" << 'S'
-#!/usr/bin/env auto-python
+#!/usr/bin/env /usr/local/bin/auto-python
 # auto-shebang-suffixes=:custom
 print("custom suffix")
 S
 
 cat > "$W/project/scripts/no-bare-suffix.py" << 'S'
-#!/usr/bin/env auto-python
+#!/usr/bin/env /usr/local/bin/auto-python
 # auto-shebang-suffixes=primary:secondary
 print("no bare")
 S
 
 cat > "$W/project/scripts/last-wins.py" << 'S'
-#!/usr/bin/env auto-python
+#!/usr/bin/env /usr/local/bin/auto-python
 # auto-shebang-probe-dirs=nonexistent
 # auto-shebang-probe-dirs=bin
 print("last wins")
 S
 
 cat > "$W/project/deeper/nested/deep.py" << 'S'
-#!/usr/bin/env auto-python
+#!/usr/bin/env /usr/local/bin/auto-python
 print("deep")
 S
 
 # --- Project B: empty (no interpreter) ---
 mkdir -p "$W/empty/scripts"
 cat > "$W/empty/scripts/orphan.py" << 'S'
-#!/usr/bin/env auto-python
+#!/usr/bin/env /usr/local/bin/auto-python
 print("orphan")
 S
 
@@ -210,7 +210,7 @@ mkdir -p "$W/real/bin" "$W/deploy/scripts" "$W/deploy/bin"
 ln -s "$W/fake-bin/fake-node" "$W/real/bin/auto-node"
 
 cat > "$W/real/app.js" << 'S'
-#!/usr/bin/env auto-node
+#!/usr/bin/env /usr/local/bin/auto-node
 // auto-shebang-follow-symlinks=yes
 console.log("app")
 S
@@ -218,7 +218,7 @@ S
 ln -s "$W/real/app.js" "$W/deploy/scripts/app.js"
 
 cat > "$W/real/app-sf.js" << 'S'
-#!/usr/bin/env auto-node
+#!/usr/bin/env /usr/local/bin/auto-node
 // auto-shebang-follow-symlinks=yes
 // auto-shebang-symlink-priority=symlink-first
 console.log("symlink-first")
@@ -235,34 +235,34 @@ mkdir -p "$W/fakehome/interp-bin"
 ln -s "$W/fake-bin/fake-python" "$W/fakehome/interp-bin/auto-python"
 
 cat > "$W/tilde.py" << 'S'
-#!/usr/bin/env auto-python
+#!/usr/bin/env /usr/local/bin/auto-python
 # auto-shebang-probe-dirs=~/interp-bin
 print("tilde")
 S
 
 # --- Variable expansion ---
 cat > "$W/expand-var.py" << 'S'
-#!/usr/bin/env auto-python
+#!/usr/bin/env /usr/local/bin/auto-python
 # auto-shebang-probe-dirs=$MY_INTERP_DIR
 # auto-shebang-unsafe-expand-probe-dirs=yes
 print("expand")
 S
 
 cat > "$W/expand-braced.py" << 'S'
-#!/usr/bin/env auto-python
+#!/usr/bin/env /usr/local/bin/auto-python
 # auto-shebang-probe-dirs=${MY_INTERP_DIR}
 # auto-shebang-unsafe-expand-probe-dirs=yes
 print("braced")
 S
 
 cat > "$W/expand-cmdsub.py" << 'S'
-#!/usr/bin/env auto-python
+#!/usr/bin/env /usr/local/bin/auto-python
 # auto-shebang-probe-dirs=$(whoami)/bin
 # auto-shebang-unsafe-expand-probe-dirs=yes
 S
 
 cat > "$W/expand-backtick.py" << 'S'
-#!/usr/bin/env auto-python
+#!/usr/bin/env /usr/local/bin/auto-python
 # auto-shebang-probe-dirs=`whoami`/bin
 # auto-shebang-unsafe-expand-probe-dirs=yes
 S
@@ -274,7 +274,7 @@ printf '#!/bin/sh\n' > "$W/not-executable"
 mkdir -p "$W/exec-test/interp" "$W/exec-test/scripts"
 ln -s "$W/fake-bin/fake-python" "$W/exec-test/interp/auto-python"
 cat > "$W/exec-test/scripts/test.py" << 'S'
-#!/usr/bin/env auto-python
+#!/usr/bin/env /usr/local/bin/auto-python
 # auto-shebang-probe-dirs=interp
 print("test")
 S
