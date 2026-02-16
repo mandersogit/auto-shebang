@@ -125,7 +125,7 @@ trap 'rm -rf "$W"' EXIT
 
 printf 'Test workspace: %s\n' "$W"
 printf 'Resolver: %s\n' "$RESOLVER"
-printf 'Shell: %s\n' "$(readlink -f /proc/$$/exe 2>/dev/null || echo "$SHELL")"
+printf 'Shell: %s\n' "$(readlink -f /proc/$$/exe 2>/dev/null || echo "${SHELL:-sh}")"
 
 # Fake interpreters — shell scripts that echo their invocation
 mkdir -p "$W/fake-bin"
@@ -282,6 +282,48 @@ S
 cp "$RESOLVER" "$W/exec-test/auto-python"
 chmod +x "$W/exec-test/auto-python"
 
+# --- Spaces in paths + trailing directive comments ---
+mkdir -p "$W/space project/tools" "$W/space project/scripts"
+ln -s "$W/fake-bin/fake-python" "$W/space project/tools/auto-python"
+
+cat > "$W/space project/scripts/space script.py" << 'S'
+#!/usr/bin/env /usr/local/bin/auto-python
+# auto-shebang-probe-dirs=tools # trailing comment should be ignored
+print("space path")
+S
+
+# --- Directive line limit (directives after line 30 ignored) ---
+mkdir -p "$W/limit/scripts" "$W/limit/custombin"
+ln -s "$W/fake-bin/fake-python" "$W/limit/custombin/auto-python"
+
+line31="$W/limit/scripts/line31.py"
+printf '#!/usr/bin/env /usr/local/bin/auto-python\n' > "$line31"
+i=0
+while [ "$i" -lt 29 ]; do
+    printf '# filler %d\n' "$i" >> "$line31"
+    i=$((i + 1))
+done
+printf '# auto-shebang-probe-dirs=custombin\n' >> "$line31"
+printf 'print("line31")\n' >> "$line31"
+
+# --- Edge case: colon in directory name ---
+mkdir -p "$W/colon:dir/bin" "$W/colon:dir/scripts"
+ln -s "$W/fake-bin/fake-python" "$W/colon:dir/bin/auto-python"
+
+cat > "$W/colon:dir/scripts/test.py" << 'S'
+#!/usr/bin/env /usr/local/bin/auto-python
+print("colon")
+S
+
+# --- Edge case: leading dash in filenames ---
+mkdir -p "$W/dashdir/bin" "$W/dashdir/scripts"
+ln -s "$W/fake-bin/fake-python" "$W/dashdir/bin/auto-python"
+
+cat > "$W/dashdir/scripts/-weird-name.py" << 'S'
+#!/usr/bin/env /usr/local/bin/auto-python
+print("dash")
+S
+
 
 # ============================================================
 #  Tests
@@ -292,7 +334,7 @@ describe "CLI interface"
 it "version flag prints version string"
 run sh "$RESOLVER" --version
 assert_eq "0" "$_run_rc"
-assert_contains "$_run_stdout" "auto-shebang 3."
+assert_contains "$_run_stdout" "auto-shebang 1."
 
 it "help flag prints usage with resolve command"
 run sh "$RESOLVER" --help
@@ -684,6 +726,59 @@ rm "$EXAMPLE_COPY/bin/auto-python"
 run sh "$EXAMPLES_DIR/library/check-setup.sh" "$RESOLVER" "$EXAMPLE_COPY"
 assert_eq "1" "$_run_rc"
 assert_contains "$_run_stderr" "MISSING"
+
+# ============================================================
+
+describe "Robustness edge cases"
+
+it "handles spaces in script paths and ignores trailing directive comments"
+run sh "$RESOLVER" --resolve auto-python "$W/space project/scripts/space script.py"
+assert_eq "0" "$_run_rc"
+assert_eq "$W/space project/tools/auto-python" "$_run_stdout"
+
+it "ignores directives after line 30"
+run sh "$RESOLVER" --resolve auto-python "$W/limit/scripts/line31.py"
+assert_eq "127" "$_run_rc"
+
+it "resolves interpreter when directory name contains colons"
+run sh "$RESOLVER" --resolve auto-python "$W/colon:dir/scripts/test.py"
+assert_eq "0" "$_run_rc"
+assert_eq "$W/colon:dir/bin/auto-python" "$_run_stdout"
+
+it "resolves interpreter when script name starts with dash"
+run sh "$RESOLVER" --resolve auto-python "$W/dashdir/scripts/-weird-name.py"
+assert_eq "0" "$_run_rc"
+assert_eq "$W/dashdir/bin/auto-python" "$_run_stdout"
+
+# ============================================================
+
+describe "Environment variable validation"
+
+it "invalid UNSAFE_EXPAND boolean exits 2 with value in message"
+run env AUTO_SHEBANG_UNSAFE_EXPAND_PROBE_DIRS=yes \
+    sh "$RESOLVER" --check auto-python "$W/project/scripts/plain.py"
+assert_eq "2" "$_run_rc"
+assert_contains "$_run_stderr" "yes"
+assert_contains "$_run_stderr" "must be 1 or 0"
+
+# ============================================================
+
+describe "CLI --debug flag"
+
+it "debug flag enables trace output on stderr"
+run sh "$RESOLVER" --debug --resolve auto-python "$W/project/scripts/plain.py"
+assert_eq "0" "$_run_rc"
+assert_eq "$W/project/bin/auto-python" "$_run_stdout"
+assert_contains "$_run_stderr" "config:"
+
+it "debug flag works with --check"
+run sh "$RESOLVER" --debug --check auto-python "$W/project/scripts/plain.py"
+assert_eq "0" "$_run_rc"
+assert_contains "$_run_stderr" "config:"
+
+it "help output mentions --debug"
+run sh "$RESOLVER" --help
+assert_contains "$_run_stdout" "--debug"
 
 # ============================================================
 

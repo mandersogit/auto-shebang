@@ -1,6 +1,6 @@
 #!/bin/sh
 # auto-shebang — language-agnostic interpreter resolver
-# Version: 3.0.1 | License: MIT
+# Copyright (c) 2026 Matt Anderson | Version: 1.0 | License: MIT
 # Compatibility: POSIX sh (dash, ash, bash, ksh, zsh, busybox sh)
 # Uses 'local' keyword (not strict POSIX, but universally supported).
 #
@@ -10,7 +10,7 @@
 #
 # See: https://github.com/manderso/auto-shebang
 
-AUTO_SHEBANG_VERSION="3.0.1"
+AUTO_SHEBANG_VERSION="1.0"
 AUTO_SHEBANG_RESULT=""
 
 # --- Globals ---
@@ -198,7 +198,7 @@ auto_shebang_build_config() {
             case "$AUTO_SHEBANG_UNSAFE_EXPAND_PROBE_DIRS" in
                 1) _as_cfg_unsafe_expand="yes"; _as_src_unsafe_expand="env" ;;
                 0) _as_cfg_unsafe_expand="no"; _as_src_unsafe_expand="env" ;;
-                *) auto_shebang_die 2 "invalid AUTO_SHEBANG_UNSAFE_EXPAND_PROBE_DIRS (must be 1 or 0)" ;;
+                *) auto_shebang_die 2 "invalid AUTO_SHEBANG_UNSAFE_EXPAND_PROBE_DIRS: '$AUTO_SHEBANG_UNSAFE_EXPAND_PROBE_DIRS' (must be 1 or 0)" ;;
             esac
         fi
         if [ -n "${AUTO_SHEBANG_SUFFIXES:-}" ]; then
@@ -224,7 +224,9 @@ auto_shebang_dump_config() {
 
 # --- Safe variable substitution ---
 # Expands $NAME and ${NAME} from the environment.
-# Rejects command substitution, backticks, globs.
+# Rejects command substitution and backticks.
+# Glob characters (*, ?, [) are not explicitly rejected but do not expand
+# because all expanded values are used in quoted contexts.
 
 auto_shebang_expand_vars() {
     local input="$1"
@@ -568,6 +570,22 @@ auto_shebang_resolve() {
 
 # --- Main ---
 
+auto_shebang_usage() {
+    printf '%s\n' "auto-shebang $AUTO_SHEBANG_VERSION -- language-agnostic interpreter resolver"
+    printf '\n'
+    printf '%s\n' "Usage:"
+    printf '%s\n' "  auto-shebang --resolve <name> <script>  Print interpreter path"
+    printf '%s\n' "  auto-shebang --check <name> <script>    Test if resolvable"
+    printf '%s\n' "  auto-shebang --version                  Print version"
+    printf '%s\n' "  auto-shebang --debug --resolve|--check  Enable debug trace"
+    printf '\n'
+    printf '%s\n' "Typically invoked via language-specific alias:"
+    printf '%s\n' "  ln -s auto-shebang auto-python"
+    printf '%s\n' "  #!/usr/bin/env /path/to/auto-python"
+    printf '\n'
+    printf '%s\n' "https://github.com/manderso/auto-shebang"
+}
+
 auto_shebang_main() {
     local search_name mode original_script
 
@@ -584,24 +602,21 @@ auto_shebang_main() {
 
     case "$search_name" in
         auto-shebang)
+            # Consume leading flags (--debug)
+            while :; do
+                case "${1:-}" in
+                    --debug) _as_debug=1; shift ;;
+                    *) break ;;
+                esac
+            done
+
             case "${1:-}" in
                 --version)
                     printf '%s\n' "auto-shebang $AUTO_SHEBANG_VERSION"
                     exit 0
                     ;;
                 --help|-h)
-                    printf '%s\n' "auto-shebang $AUTO_SHEBANG_VERSION -- language-agnostic interpreter resolver"
-                    printf '\n'
-                    printf '%s\n' "Usage:"
-                    printf '%s\n' "  auto-shebang --resolve <name> <script>  Print interpreter path"
-                    printf '%s\n' "  auto-shebang --check <name> <script>    Test if resolvable"
-                    printf '%s\n' "  auto-shebang --version                  Print version"
-                    printf '\n'
-                    printf '%s\n' "Typically invoked via language-specific alias:"
-                    printf '%s\n' "  ln -s auto-shebang auto-python"
-                    printf '%s\n' "  #!/usr/bin/env /path/to/auto-python"
-                    printf '\n'
-                    printf '%s\n' "https://github.com/manderso/auto-shebang"
+                    auto_shebang_usage
                     exit 0
                     ;;
                 --resolve)
@@ -620,18 +635,7 @@ auto_shebang_main() {
                     auto_shebang_die 2 "unknown flag: $1 (use --resolve, --check, --help, or --version)"
                     ;;
                 '')
-                    printf '%s\n' "auto-shebang $AUTO_SHEBANG_VERSION -- language-agnostic interpreter resolver"
-                    printf '\n'
-                    printf '%s\n' "Usage:"
-                    printf '%s\n' "  auto-shebang --resolve <name> <script>  Print interpreter path"
-                    printf '%s\n' "  auto-shebang --check <name> <script>    Test if resolvable"
-                    printf '%s\n' "  auto-shebang --version                  Print version"
-                    printf '\n'
-                    printf '%s\n' "Typically invoked via language-specific alias:"
-                    printf '%s\n' "  ln -s auto-shebang auto-python"
-                    printf '%s\n' "  #!/usr/bin/env /path/to/auto-python"
-                    printf '\n'
-                    printf '%s\n' "https://github.com/manderso/auto-shebang"
+                    auto_shebang_usage
                     exit 0
                     ;;
                 *)
